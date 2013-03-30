@@ -249,9 +249,18 @@ class Mongo_db
 		
 		$this->_connection_string();
 		$this->_connect();
-	}	
+	}
 
-	/**
+    /**
+     * @return Mongo
+     */
+    function get_dbhandle()
+    {
+        return $this->_dbhandle;
+    }
+
+
+    /**
 	 * Switch database.
 	 * 
 	 * <code>
@@ -491,11 +500,20 @@ class Mongo_db
 	 */
 	public function where_in($field = '', $in_values = array())
 	{
-		$this->_where_init($field);
-		$this->wheres[$field]['$in'] = $in_values;
-		return $this;
-	}
-	
+        if (!is_array($field))
+        {
+            return $this->{__FUNCTION__}(array($field => $in_values));
+        }
+
+        foreach ($field AS $search_field => $values)
+        {
+            $this->_where_init($search_field);
+            $this->wheres[$search_field]['$in'] = (array)$values;
+        }
+
+        return $this;
+    }
+
 	/**
 	 * where_in_all.
 	 * 
@@ -535,9 +553,18 @@ class Mongo_db
 	 */ 
 	public function where_not_in($field = '', $in_values = array())
 	{
-		$this->_where_init($field);
-		$this->wheres[$field]['$nin'] = $in_values;
-		return $this;
+        if (!is_array($field))
+        {
+            return $this->{__FUNCTION__}(array($field => $in_values));
+        }
+
+        foreach ($field AS $search_field => $values)
+        {
+            $this->_where_init($search_field);
+            $this->wheres[$search_field]['$nin'] = (array)$values;
+        }
+
+        return $this;
 	}
 	
 	/**
@@ -943,11 +970,12 @@ class Mongo_db
 	* </code>
 	*
 	* @param string $collection Name of the collection
-	*
+    * @param mixed $with_offset_limit Effect to result of limit and offset
+    *
 	* @access public
 	* @return int
 	*/
-	public function count($collection = '')
+	public function count($collection = '', $with_offset_limit = FALSE)
 	{
 		if (empty($collection))
 		{
@@ -959,13 +987,48 @@ class Mongo_db
 						->find($this->wheres)
 						->limit($this->_limit)
 						->skip($this->_offset)
-						->count();
+						->count($with_offset_limit);
 		
 		$this->_clear($collection, 'count');
 		return $count;
 	}
-	
-	/**
+
+    /**
+     * Distinct.
+     *
+     * Return unique values of found documents
+     *
+     * <code>
+     * $this->mongo_db->distinct('key', array('key' => array('$gt' => 0)));
+     * </code>
+     *
+     * @param string $collection Name of the collection
+     * @param string $key Key for distinct
+     *
+     * @access public
+     * @return int
+     */
+    public function distinct($collection = '', $key = '')
+    {
+        if (empty($collection))
+        {
+            $this->_show_error('In order to retrieve a distinct of documents from MongoDB, a collection name must be passed', 500);
+        }
+        if (empty($key))
+        {
+            $this->_show_error('In order to retrieve a distinct of documents from MongoDB, a distinct key must be passed', 500);
+        }
+
+        $distinct = $this->_dbhandle
+            ->{$collection}->distinct($key, $this->wheres);
+
+        $this->_clear($collection, 'distinct');
+
+        return $distinct;
+    }
+
+
+    /**
 	 * Insert.
 	 *
 	 * Insert a new document
@@ -1070,8 +1133,59 @@ class Mongo_db
 			$this->_show_error('Insert of data into MongoDB failed: ' . $exception->getMessage(), 500);
 		}
 	}
-	
-	/**
+
+    /**
+     * Insert.
+     *
+     * Insert a new js document
+     *
+     * <code>
+     * $this->mongo_db->insert_js(array('func_name'=>'function(val){return val}'));
+     * </code>
+     *
+     * @param array  $insert     The js document to be inserted
+     *
+     * @access public
+     * @return boolean
+     */
+
+    public function insert_js($insert = array())
+    {
+        if (count($insert) === 0 OR ! is_array($insert))
+        {
+            $this->_show_error('Nothing to insert into Mongo collection or insert is not an array', 500);
+        }
+
+        $insert = array(
+            '_id'   => key($insert),
+            'value' => new MongoCode(current($insert))
+        );
+
+        try
+        {
+            $this->_dbhandle
+                ->system->js
+                ->save($insert);
+
+            if (isset($insert['_id']))
+            {
+                return $insert['_id'];
+            }
+
+            else
+            {
+                return FALSE;
+            }
+        }
+
+        catch (MongoCursorException $exception)
+        {
+            $this->_show_error('Insert of data into MongoDB failed: ' .$exception->getMessage(), 500);
+        }
+    }
+
+
+    /**
 	 * Update a document.
 	 *
 	 * Updates a document
@@ -1556,7 +1670,35 @@ class Mongo_db
 			$this->_show_error('MongoDB command failed to execute: ' . $exception->getMessage(), 500);
 		}
 	}
-	
+
+    /**
+     * Execute.
+     *
+     * Runs a MongoDB db.eval()
+     *
+     * <code>
+     * $this->mongo_db->eval('return parseFloat("77a8s77d")')
+     * </code>
+     *
+     * @param array $code The command to eval
+     * @param array $args
+     *
+     * @access public
+     * @return object
+     */
+    public function execute($code, $args = array())
+    {
+        try
+        {
+            return $this->_dbhandle->execute(new MongoCode($code, $args));
+        }
+
+        catch (MongoCursorException $exception)
+        {
+            $this->_show_error('MongoDB command failed to execute: ' . $exception->getMessage(), 500);
+        }
+    }
+
 	/**
 	 * Add indexes.
 	 *
@@ -1696,29 +1838,45 @@ class Mongo_db
 		return $this->_dbhandle->{$collection}->getIndexInfo();
 	}
 
-	/**
-	 * Mongo Date.
-	 * 
-	 * Create new MongoDate object from current time or pass timestamp to create mongodate.
-	 * 
-	 * <code>
-	 * $this->mongo_db->date($timestamp);
-	 * </code>
-	 *
-	 * @param int|null $timestamp A unix timestamp (or NULL to return a MongoDate relative to time()
-	 *
-	 * @access public
-	 * @return array|object
-	 */    
-	public function date($timestamp = NULL)
-	{
-		if ($timestamp === NULL)
-		{   
-			return new MongoDate();
-		}
-		
-		return new MongoDate($timestamp);            
-	}
+    /**
+     * Mongo Date.
+     *
+     * Create new MongoDate object from current time or pass timestamp to create mongodate.
+     *
+     * <code>
+     * $this->mongo_db->date($timestamp);
+     * </code>
+     *
+     * @param int|null $timestamp A unix timestamp (or NULL to return a MongoDate relative to time()
+     * @param boolean $with_microtime include microtime in MongoDate
+     *
+     * @access public
+     * @return MongoDate
+     */
+    public static function date($timestamp = NULL, $with_microtime = FALSE)
+    {
+        if ($timestamp === NULL)
+        {
+            if (!$with_microtime)
+            {
+                return new MongoDate();
+            }
+            else
+            {
+                $timestamp = $timestamp ? $timestamp : time();
+                return new MongoDate($timestamp, (float)microtime() * 1000000);
+            }
+        }
+
+        if ( !($timestamp instanceof MongoDate) AND !is_numeric($timestamp) )
+        {
+            $timestamp = strtotime($timestamp);
+
+            return new MongoDate($timestamp);
+        }
+
+        return ($timestamp instanceof MongoDate) ? $timestamp : new MongoDate($timestamp);
+    }
 
 	/**
 	 * Get database reference
@@ -1958,6 +2116,7 @@ class Mongo_db
 	 * @param int    $response_code Response code 
 	 *
 	 * @access private
+     * @throws Exception
 	 * @return void
 	 */
 	private function _show_error($error_message = '', $response_code = 500)
@@ -1972,6 +2131,51 @@ class Mongo_db
 			show_error($error_message, $response_code);
 		}
 	}
+
+    /**
+     * Prepare input ids to MongoDB ID object
+     *
+     * @param mixed $ids Scalar or array of IDs
+     *
+     * @access public
+     * @return array
+     */
+    public static function prepare_ids($ids)
+    {
+        $ids = array_unique((array)$ids);
+
+        $ids = array_filter($ids, function(&$id){
+            return $id ? $id = Mongo_db::id($id) : NULL;
+        });
+
+        return $ids;
+    }
+
+
+    /**
+     * @param mixed $monoid_object
+     * @return bool
+     */
+    public static function is_mongoid($monoid_object)
+    {
+        return $monoid_object instanceof MongoId;
+    }
+
+    /**
+     * @param mixed $id
+     * @return MongoID|null
+     */
+    public static function id($id)
+    {
+        if ( $id )
+        {
+            return self::is_mongoid($id) ? $id : new MongoID($id);
+        }
+        else
+        {
+            return NULL;
+        }
+    }
 	
 }
 
